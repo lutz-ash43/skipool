@@ -1,0 +1,20 @@
+# Dockerfile for Cloud Run Migration Job
+# This is a minimal container that runs the migration script
+
+FROM python:3.12-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install only required dependencies for migration
+RUN pip install --no-cache-dir \
+    sqlalchemy==2.0.44 \
+    psycopg2-binary==2.9.11
+
+# Copy migration script and database config
+COPY migrate_database.py .
+COPY database.py .
+COPY models.py .
+
+# Run migration (non-interactive mode)
+CMD ["python", "migrate_database.py", "--yes"]

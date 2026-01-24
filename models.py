@@ -43,6 +43,11 @@ class RideRequest(Base):
     departure_time = Column(String)  # Added: matches schema and used in create_ride_request
     status = Column(String, default="pending") # pending, matched
     
+    # Real-time location tracking (for "Ride Now" mode)
+    current_lat = Column(Float, nullable=True)
+    current_lng = Column(Float, nullable=True)
+    last_location_update = Column(DateTime, nullable=True)
+    
     # For scheduled rides
     request_date = Column(Date, nullable=True)  # Date of the ride request (tomorrow, etc.)
     

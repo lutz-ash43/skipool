@@ -57,6 +57,8 @@ class RideRequest(RideRequestBase):
     id: int
     pickup_lat: float
     pickup_lng: float
+    current_lat: Optional[float] = None
+    current_lng: Optional[float] = None
     status: str
     matched_trip_id: Optional[int] = None
     suggested_hub_id: Optional[str] = None

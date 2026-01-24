@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Query, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from sqlalchemy import text, inspect
+from typing import List, Optional, Tuple
 import math
 from datetime import datetime, date, timedelta
 from geopy.geocoders import Nominatim
@@ -13,7 +14,28 @@ import schemas
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
-geolocator = Nominatim(user_agent="skipool_app")
+geolocator = Nominatim(user_agent="skipool_app", timeout=10)  # 10 second timeout
+
+
+def _geocode_address(raw: str) -> Tuple[Optional[float], Optional[float]]:
+    """Try to geocode an address. Tries several query formats. Returns (lat, lng) or (None, None)."""
+    s = (raw or "").strip()
+    if not s:
+        return None, None
+    queries = [
+        f"{s}, Utah",
+        s,
+        f"{s}, Utah, USA",
+    ]
+    for q in queries:
+        try:
+            loc = geolocator.geocode(q, timeout=10)
+            if loc and loc.latitude is not None and loc.longitude is not None:
+                return float(loc.latitude), float(loc.longitude)
+        except Exception:
+            continue
+    return None, None
+
 
 # --- DATA CONFIGURATION ---
 RESORTS_DATA = [
@@ -82,14 +104,66 @@ def get_hubs_for_resort(resort: str):
     allowed_ids = RESORT_HUB_MAP.get(resort, [])
     return {hid: HUBS[hid] for hid in allowed_ids if hid in HUBS}
 
+@app.get("/health/db")
+def check_database_health(db: Session = Depends(get_db)):
+    """Test database connection and return status"""
+    try:
+        # Test 1: Simple query to check connection
+        result = db.execute(text("SELECT 1 as test"))
+        test_value = result.scalar()
+        
+        # Test 2: Check if tables exist
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+        
+        # Test 3: Try a simple query on trips table (if exists)
+        trips_count = None
+        requests_count = None
+        if 'trips' in tables:
+            trips_count = db.query(Trip).count()
+        if 'ride_requests' in tables:
+            requests_count = db.query(RideRequest).count()
+        
+        return {
+            "status": "healthy",
+            "database_connected": True,
+            "test_query": test_value == 1,
+            "tables_found": tables,
+            "trips_count": trips_count,
+            "ride_requests_count": requests_count,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "database_connected": False,
+            "error": str(e),
+            "error_type": type(e).__name__,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
 # --- TRIP ENDPOINTS (DRIVER) ---
 @app.post("/trips/", response_model=schemas.Trip)
 def create_trip(trip: schemas.TripCreate, db: Session = Depends(get_db)):
+    is_scheduled = not trip.is_realtime
     lat, lng = trip.current_lat, trip.current_lng
-    if trip.start_location_text:
-        loc = geolocator.geocode(f"{trip.start_location_text}, Utah")
-        if loc:
-            lat, lng = loc.latitude, loc.longitude
+    
+    # Geocode if text address provided (overrides current_lat/lng when manual)
+    if (trip.start_location_text or "").strip():
+        glat, glng = _geocode_address(trip.start_location_text)
+        if glat is not None and glng is not None:
+            lat, lng = glat, glng
+    
+    # For scheduled rides: location is REQUIRED for optimal hub matching
+    # For Ride Now: location is preferred but can use current location later
+    if not lat or not lng:
+        if is_scheduled:
+            msg = "Starting location is required. Use the 📍 button for GPS, or enter an address like 'Sugar House, Salt Lake City' or 'Park City, UT'."
+            if (trip.start_location_text or "").strip():
+                msg = "We couldn't find that address. Try adding city/state (e.g. 'Sugar House, Salt Lake City') or use the 📍 button for GPS."
+            raise HTTPException(status_code=400, detail=msg)
+        # For Ride Now, we can proceed without start location (will use current location)
+        lat, lng = None, None
     
     # Initialize current location for real-time trips
     current_lat, current_lng = trip.current_lat, trip.current_lng
@@ -150,12 +224,30 @@ def update_trip_location(trip_id: int, location: schemas.LocationUpdate, db: Ses
 
 # --- MATCHING & SEARCH ---
 @app.get("/match-nearby-passengers/")
-def match_passengers(lat: float, lng: float, resort: str, db: Session = Depends(get_db)):
-    """Find passengers near driver's route (for real-time trips)"""
+def match_passengers(trip_id: int, resort: str, db: Session = Depends(get_db)):
+    """Find passengers near driver's current route (for real-time trips)
+    
+    Uses driver's current location from the trip to find passengers along their route.
+    """
+    # Get the driver's trip and current location
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found")
+    if not trip.is_realtime:
+        raise HTTPException(status_code=400, detail="This endpoint is only for real-time trips")
+    
+    # Use driver's current location (updated as they drive), fallback to start location
+    driver_lat = trip.current_lat if trip.current_lat else trip.start_lat
+    driver_lng = trip.current_lng if trip.current_lng else trip.start_lng
+    
+    if not driver_lat or not driver_lng:
+        return []  # No location available
+    
     resort_coords = next((r for r in RESORTS_DATA if r["name"] == resort), None)
-    if not resort_coords: return []
+    if not resort_coords: 
+        return []
 
-    # Only match real-time requests (departure_time == "Now" or is_realtime equivalent)
+    # Only match real-time requests (departure_time == "Now")
     requests = db.query(RideRequest).filter(
         RideRequest.resort == resort,
         RideRequest.status == "pending",
@@ -164,16 +256,46 @@ def match_passengers(lat: float, lng: float, resort: str, db: Session = Depends(
 
     matches = []
     for req in requests:
-        xtd = get_cross_track_distance(lat, lng, resort_coords["lat"], resort_coords["lng"], req.pickup_lat, req.pickup_lng)
-        if xtd < 2.0: # Match if within 2km of the route
+        # Use passenger's current location if available (they're moving), otherwise pickup location
+        passenger_lat = req.current_lat if req.current_lat else req.pickup_lat
+        passenger_lng = req.current_lng if req.current_lng else req.pickup_lng
+        
+        if not passenger_lat or not passenger_lng:
+            continue
+            
+        # Check if passenger is on driver's route using driver's CURRENT location
+        xtd = get_cross_track_distance(
+            driver_lat, driver_lng, 
+            resort_coords["lat"], resort_coords["lng"], 
+            passenger_lat, passenger_lng
+        )
+        if xtd < 2.0:  # Match if within 2km of the route
             matches.append(req)
     return matches
 
 @app.get("/match-nearby-drivers/")
-def match_drivers(lat: float, lng: float, resort: str, db: Session = Depends(get_db)):
-    """Find active drivers near passenger (for real-time rides)"""
+def match_drivers(request_id: int, resort: str, db: Session = Depends(get_db)):
+    """Find active drivers near passenger's current location (for real-time rides)
+    
+    Uses passenger's current location from the request to find drivers who will pass them.
+    """
+    # Get the passenger's request and current location
+    request = db.query(RideRequest).filter(RideRequest.id == request_id).first()
+    if not request:
+        raise HTTPException(status_code=404, detail="Ride request not found")
+    if request.departure_time != "Now":
+        raise HTTPException(status_code=400, detail="This endpoint is only for real-time ride requests")
+    
+    # Use passenger's current location (updated as they move), fallback to pickup location
+    passenger_lat = request.current_lat if request.current_lat else request.pickup_lat
+    passenger_lng = request.current_lng if request.current_lng else request.pickup_lng
+    
+    if not passenger_lat or not passenger_lng:
+        return []  # No location available
+    
     resort_coords = next((r for r in RESORTS_DATA if r["name"] == resort), None)
-    if not resort_coords: return []
+    if not resort_coords: 
+        return []
 
     # Get active real-time trips going to the same resort
     trips = db.query(Trip).filter(
@@ -186,23 +308,30 @@ def match_drivers(lat: float, lng: float, resort: str, db: Session = Depends(get
 
     matches = []
     for trip in trips:
-        # Use driver's current location if available, otherwise start location
-        driver_lat = trip.current_lat if trip.current_lat else trip.start_lat
-        driver_lng = trip.current_lng if trip.current_lng else trip.start_lng
+        # Use driver's current location (updated as they drive)
+        driver_lat = trip.current_lat
+        driver_lng = trip.current_lng
         
         if not driver_lat or not driver_lng:
             continue
             
-        # Check if passenger is on driver's route
-        xtd = get_cross_track_distance(driver_lat, driver_lng, resort_coords["lat"], resort_coords["lng"], lat, lng)
+        # Check if passenger's CURRENT location is on driver's route
+        xtd = get_cross_track_distance(
+            driver_lat, driver_lng, 
+            resort_coords["lat"], resort_coords["lng"], 
+            passenger_lat, passenger_lng
+        )
         if xtd < 2.0:  # Within 2km of route
             matches.append({
                 "id": trip.id,
                 "driver_name": trip.driver_name,
                 "current_lat": driver_lat,
                 "current_lng": driver_lng,
+                "start_lat": trip.start_lat,  # For fallback
+                "start_lng": trip.start_lng,  # For fallback
                 "available_seats": trip.available_seats,
-                "departure_time": trip.departure_time
+                "departure_time": trip.departure_time,
+                "resort": trip.resort
             })
     return matches
 
@@ -250,6 +379,8 @@ def get_active_requests(is_realtime: Optional[bool] = None, db: Session = Depend
             "resort": req.resort,
             "pickup_lat": req.pickup_lat,
             "pickup_lng": req.pickup_lng,
+            "current_lat": req.current_lat,
+            "current_lng": req.current_lng,
             "departure_time": req.departure_time,
             "status": req.status
         }
@@ -257,22 +388,28 @@ def get_active_requests(is_realtime: Optional[bool] = None, db: Session = Depend
     ]
 
 def parse_time(time_str: str) -> Optional[int]:
-    """Parse time string like '7:00 AM' to minutes since midnight"""
-    try:
-        if time_str.lower() == "now":
-            return None
-        time_str = time_str.strip().upper()
-        if "AM" in time_str or "PM" in time_str:
-            time_part = time_str.replace("AM", "").replace("PM", "").strip()
-            hour, minute = map(int, time_part.split(":"))
-            if "PM" in time_str and hour != 12:
-                hour += 12
-            elif "AM" in time_str and hour == 12:
-                hour = 0
-            return hour * 60 + minute
-    except:
+    """Parse time string like '7:00 AM' or '7:00AM' to minutes since midnight"""
+    if not time_str or not isinstance(time_str, str):
         return None
-    return None
+    try:
+        s = time_str.strip().upper()
+        if s == "NOW":
+            return None
+        if "AM" not in s and "PM" not in s:
+            return None
+        time_part = s.replace("AM", "").replace("PM", "").strip()
+        parts = time_part.split(":")
+        if len(parts) < 2:
+            return None
+        hour = int(parts[0].strip())
+        minute = int(parts[1].strip())
+        if "PM" in s and hour != 12:
+            hour += 12
+        elif "AM" in s and hour == 12:
+            hour = 0
+        return hour * 60 + minute
+    except (ValueError, AttributeError):
+        return None
 
 def time_difference_minutes(time1_str: str, time2_str: str) -> Optional[int]:
     """Calculate absolute difference in minutes between two time strings"""
@@ -281,6 +418,28 @@ def time_difference_minutes(time1_str: str, time2_str: str) -> Optional[int]:
     if t1 is None or t2 is None:
         return None
     return abs(t1 - t2)
+
+def _normalize_date(d) -> Optional[date]:
+    """Normalize DB value to date for comparison. Handles date, datetime, 'YYYY-MM-DD' string."""
+    if d is None:
+        return None
+    if isinstance(d, datetime):
+        return d.date()
+    if isinstance(d, date):
+        return d
+    if isinstance(d, str) and len(d) >= 10:
+        try:
+            return datetime.strptime(d[:10], "%Y-%m-%d").date()
+        except ValueError:
+            pass
+    if hasattr(d, "date") and callable(getattr(d, "date", None)):
+        out = d.date()
+        return out if isinstance(out, date) else None
+    return None
+
+def _date_eq(d, target: date) -> bool:
+    n = _normalize_date(d)
+    return n is not None and n == target
 
 @app.get("/get-optimal-hub/")
 def get_optimal_hub(p_lat: float, p_lng: float, trip_id: int, db: Session = Depends(get_db)):
@@ -312,17 +471,17 @@ def match_scheduled_rides(resort: str, target_date: Optional[date] = None, db: S
     trips = db.query(Trip).filter(
         Trip.resort == resort,
         Trip.is_realtime == False,
-        Trip.trip_date == target_date,
         Trip.available_seats > 0
     ).all()
+    trips = [t for t in trips if _date_eq(t.trip_date, target_date)]
     
     # Get scheduled ride requests for the target date
     requests = db.query(RideRequest).filter(
         RideRequest.resort == resort,
         RideRequest.status == "pending",
-        RideRequest.request_date == target_date,
         RideRequest.departure_time != "Now"
     ).all()
+    requests = [r for r in requests if _date_eq(r.request_date, target_date)]
     
     if not trips or not requests:
         return []
@@ -335,42 +494,36 @@ def match_scheduled_rides(resort: str, target_date: Optional[date] = None, db: S
     
     for trip in trips:
         for req in requests:
-            # Skip if already matched
             if req.matched_trip_id:
                 continue
             
-            # Calculate time compatibility (prefer times within 30 minutes)
             time_diff = time_difference_minutes(trip.departure_time, req.departure_time)
-            if time_diff is None or time_diff > 60:  # More than 1 hour difference is not ideal
+            if time_diff is None or time_diff > 60:
                 continue
             
-            # Find optimal hub for this match
+            # Need coords for hub search or fallback; skip if missing
+            if trip.start_lat is None or trip.start_lng is None or req.pickup_lat is None or req.pickup_lng is None:
+                continue
+            
             valid_hub_ids = RESORT_HUB_MAP.get(resort, [])
             best_hub = None
             best_score = float('inf')
-            
+            HUB_ROUTE_KM = 5.0
+
             for hub_id in valid_hub_ids:
                 if hub_id not in HUBS:
                     continue
                 hub = HUBS[hub_id]
-                
-                # Check if hub is on driver's route
                 driver_xtd = get_cross_track_distance(
                     trip.start_lat, trip.start_lng,
                     resort_coords["lat"], resort_coords["lng"],
                     hub["lat"], hub["lng"]
                 )
-                if driver_xtd > 1.5:  # Hub too far from driver's route
+                if driver_xtd > HUB_ROUTE_KM:
                     continue
-                
-                # Calculate distances
                 dist_driver = haversine(trip.start_lat, trip.start_lng, hub["lat"], hub["lng"])
                 dist_passenger = haversine(req.pickup_lat, req.pickup_lng, hub["lat"], hub["lng"])
-                
-                # Score: total distance + time difference penalty
-                # Lower score is better
-                score = dist_driver + dist_passenger + (time_diff * 0.1)  # 0.1 km per minute difference
-                
+                score = dist_driver + dist_passenger + (time_diff * 0.1)
                 if score < best_score:
                     best_score = score
                     best_hub = {
@@ -381,7 +534,20 @@ def match_scheduled_rides(resort: str, target_date: Optional[date] = None, db: S
                         "driver_distance": dist_driver,
                         "passenger_distance": dist_passenger
                     }
-            
+
+            # Fallback: use "Meet at driver's start" when we have coords (use "is not None" so 0.0 is valid)
+            if not best_hub and trip.start_lat is not None and trip.start_lng is not None and req.pickup_lat is not None and req.pickup_lng is not None:
+                dist_driver = 0.0
+                dist_passenger = haversine(req.pickup_lat, req.pickup_lng, trip.start_lat, trip.start_lng)
+                best_hub = {
+                    "id": "driver_start",
+                    "name": "Meet at driver's start",
+                    "lat": trip.start_lat,
+                    "lng": trip.start_lng,
+                    "driver_distance": dist_driver,
+                    "passenger_distance": dist_passenger
+                }
+
             if best_hub:
                 matches.append(schemas.ScheduledMatch(
                     trip_id=trip.id,
@@ -402,31 +568,131 @@ def match_scheduled_rides(resort: str, target_date: Optional[date] = None, db: S
                 ))
     
     # Sort by best match (lowest total distance + time penalty)
-    matches.sort(key=lambda x: x["hub_distance_driver"] + x["hub_distance_passenger"])
+    matches.sort(key=lambda x: x.hub_distance_driver + x.hub_distance_passenger)
     
     return matches[:10]  # Return top 10 matches
+
+@app.get("/match-scheduled/debug")
+def match_scheduled_debug(resort: str, target_date: Optional[date] = None, db: Session = Depends(get_db)):
+    """Debug why match-scheduled returns no matches. Use same resort & target_date as match-scheduled."""
+    if target_date is None:
+        target_date = date.today() + timedelta(days=1)
+    
+    trips = db.query(Trip).filter(
+        Trip.resort == resort,
+        Trip.is_realtime == False,
+        Trip.available_seats > 0
+    ).all()
+    trips = [t for t in trips if _date_eq(t.trip_date, target_date)]
+    
+    requests = db.query(RideRequest).filter(
+        RideRequest.resort == resort,
+        RideRequest.status == "pending",
+        RideRequest.departure_time != "Now"
+    ).all()
+    requests = [r for r in requests if _date_eq(r.request_date, target_date)]
+    
+    def _t(t):
+        return {
+            "id": t.id,
+            "departure_time": t.departure_time,
+            "trip_date": str(t.trip_date),
+            "trip_date_normalized": str(_normalize_date(t.trip_date) or ""),
+            "start_lat": t.start_lat,
+            "start_lng": t.start_lng,
+        }
+    def _r(r):
+        return {
+            "id": r.id,
+            "departure_time": r.departure_time,
+            "request_date": str(r.request_date),
+            "request_date_normalized": str(_normalize_date(r.request_date) or ""),
+            "pickup_lat": r.pickup_lat,
+            "pickup_lng": r.pickup_lng,
+        }
+    
+    skip_time = skip_coords = skip_matched = would_match = 0
+    for t in trips:
+        for r in requests:
+            if r.matched_trip_id:
+                skip_matched += 1
+                continue
+            td = time_difference_minutes(t.departure_time, r.departure_time)
+            if td is None or td > 60:
+                skip_time += 1
+                continue
+            if t.start_lat is None or t.start_lng is None or r.pickup_lat is None or r.pickup_lng is None:
+                skip_coords += 1
+                continue
+            would_match += 1
+    
+    return {
+        "target_date": str(target_date),
+        "resort": resort,
+        "trips_count": len(trips),
+        "requests_count": len(requests),
+        "pairs_with_time_ok": would_match + skip_coords,
+        "pairs_would_match": would_match,
+        "skip_time": skip_time,
+        "skip_coords": skip_coords,
+        "skip_matched": skip_matched,
+        "trips_sample": [_t(t) for t in trips[:5]],
+        "requests_sample": [_r(r) for r in requests[:5]],
+    }
 
 @app.post("/match-scheduled/{match_id}/confirm")
 def confirm_scheduled_match(match_id: int, db: Session = Depends(get_db)):
     """Confirm a scheduled match and link the trip and request"""
-    # This would be called from the match-scheduled results
-    # For now, we'll need to pass trip_id and request_id separately
-    # This is a placeholder - you may want to store matches first
     pass
 
 # --- RIDE REQUESTS (PASSENGER) ---
 @app.post("/ride-requests/", response_model=schemas.RideRequest)
 def create_ride_request(req: schemas.RideRequestCreate, db: Session = Depends(get_db)):
     lat, lng = req.lat, req.lng
-    if not lat and req.pickup_text:
-        loc = geolocator.geocode(f"{req.pickup_text}, Utah")
-        if loc: lat, lng = loc.latitude, loc.longitude
+    is_scheduled = (req.departure_time or "").strip().lower() != "now"
 
+    # Geocode if text address provided and no lat/lng
+    pickup_text = (req.pickup_text or "").strip()
+    if (not lat or not lng) and pickup_text:
+        glat, glng = _geocode_address(req.pickup_text)
+        if glat is not None and glng is not None:
+            lat, lng = glat, glng
+
+    # For scheduled rides: location is REQUIRED for optimal hub matching
+    # For Ride Now: location is REQUIRED for real-time matching
+    if not lat or not lng:
+        if pickup_text:
+            raise HTTPException(
+                status_code=400,
+                detail="We couldn't find that address. Try adding city/state (e.g. 'Sugar House, Salt Lake City' or 'Park City, UT') or use the 📍 button for GPS."
+            )
+        if is_scheduled:
+            raise HTTPException(
+                status_code=400,
+                detail="Pickup location is required. Enter an address (e.g. 'Sugar House, Salt Lake City') or use the 📍 button for GPS."
+            )
+        raise HTTPException(
+            status_code=400,
+            detail="Pickup location is required. Use the 📍 button for GPS or enter a valid address."
+        )
+
+    # Initialize current location for real-time requests
+    current_lat, current_lng = req.lat, req.lng
+    is_realtime = (req.departure_time or "").strip().lower() == "now"
+    if is_realtime and current_lat and current_lng:
+        # For real-time requests, current location starts as pickup location
+        pass
+    else:
+        current_lat, current_lng = None, None
+    
     new_req = RideRequest(
         passenger_name=req.passenger_name,
         resort=req.resort,
         pickup_lat=lat,
         pickup_lng=lng,
+        current_lat=current_lat,
+        current_lng=current_lng,
+        last_location_update=datetime.utcnow() if is_realtime and current_lat else None,
         departure_time=req.departure_time,
         request_date=req.request_date,
         status="pending"
@@ -435,6 +701,22 @@ def create_ride_request(req: schemas.RideRequestCreate, db: Session = Depends(ge
     db.commit()
     db.refresh(new_req)
     return new_req
+
+@app.put("/ride-requests/{request_id}/location", response_model=schemas.RideRequest)
+def update_ride_request_location(request_id: int, location: schemas.LocationUpdate, db: Session = Depends(get_db)):
+    """Update passenger's current location for real-time ride requests"""
+    db_request = db.query(RideRequest).filter(RideRequest.id == request_id).first()
+    if not db_request:
+        raise HTTPException(status_code=404, detail="Ride request not found")
+    if db_request.departure_time != "Now":
+        raise HTTPException(status_code=400, detail="Location updates only allowed for real-time ride requests")
+    
+    db_request.current_lat = location.current_lat
+    db_request.current_lng = location.current_lng
+    db_request.last_location_update = datetime.utcnow()
+    db.commit()
+    db.refresh(db_request)
+    return db_request
 
 @app.patch("/ride-requests/{request_id}", response_model=schemas.RideRequest)
 def update_ride_request(request_id: int, updates: schemas.RideRequestUpdate, db: Session = Depends(get_db)):
