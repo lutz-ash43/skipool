@@ -23,7 +23,9 @@ class RideRequestBase(BaseModel):
     # ADDED: To match the frontend sending time
     departure_time: Optional[str] = "Now"
     # For scheduled rides
-    request_date: Optional[date] = None 
+    request_date: Optional[date] = None
+    # Number of seats needed
+    seats_needed: int = 1 
 
 # --- TRIP SCHEMAS (Driver) ---
 class TripCreate(TripBase):
@@ -62,6 +64,7 @@ class RideRequest(RideRequestBase):
     status: str
     matched_trip_id: Optional[int] = None
     suggested_hub_id: Optional[str] = None
+    seats_needed: int = 1
     created_at: Optional[datetime] = None
 
     class Config:

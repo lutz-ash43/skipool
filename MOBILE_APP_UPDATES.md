@@ -59,20 +59,29 @@ if (res.ok) {
 
 ### 3. Add `fetchScheduledMatches` Function
 
+**Important:** Check `res.ok` before calling `res.json()`. If the server returns 500 or plain text, `res.json()` throws "SyntaxError: JSON parse error unexpected character : I" (e.g. body is "Internal Server Error").
+
 ```typescript
 const fetchScheduledMatches = async (resort: string) => {
   try {
     const tomorrow = new Date();
     tomorrow.setDate(tomorrow.getDate() + 1);
     const tomorrowStr = tomorrow.toISOString().split('T')[0];
-    
+
     const res = await fetch(
       `${API_URL}/match-scheduled/?resort=${encodeURIComponent(resort)}&target_date=${tomorrowStr}`
     );
-    const matches = await res.json();
-    setScheduledMatches(matches);
+    if (!res.ok) {
+      const text = await res.text();
+      console.warn("match-scheduled non-OK:", res.status, text);
+      setScheduledMatches([]);
+      return;
+    }
+    const data = await res.json();
+    setScheduledMatches(Array.isArray(data) ? data : []);
   } catch (e) {
     console.error("Error fetching matches:", e);
+    setScheduledMatches([]);
     Alert.alert("Error", "Could not fetch matches");
   }
 };

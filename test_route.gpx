@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<gpx version="1.1" creator="SkiPool Test">
+  <trk>
+    <name>Route to Alta from Sugar House</name>
+    <trkseg>
+      <trkpt lat="40.7244" lon="-111.8881">
+        <time>2026-01-22T10:00:00Z</time>
+        <name>Sugar House Start</name>
+      </trkpt>
+      <trkpt lat="40.7100" lon="-111.8500">
+        <time>2026-01-22T10:05:00Z</time>
+        <name>Midway Point 1</name>
+      </trkpt>
+      <trkpt lat="40.6900" lon="-111.7800">
+        <time>2026-01-22T10:10:00Z</time>
+        <name>Midway Point 2</name>
+      </trkpt>
+      <trkpt lat="40.6500" lon="-111.7500">
+        <time>2026-01-22T10:15:00Z</time>
+        <name>Canyon Entrance</name>
+      </trkpt>
+      <trkpt lat="40.6200" lon="-111.7000">
+        <time>2026-01-22T10:20:00Z</time>
+        <name>Mid Canyon</name>
+      </trkpt>
+      <trkpt lat="40.5883" lon="-111.6358">
+        <time>2026-01-22T10:25:00Z</time>
+        <name>Alta Resort</name>
+      </trkpt>
+    </trkseg>
+  </trk>
+</gpx>

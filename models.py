@@ -51,6 +51,9 @@ class RideRequest(Base):
     # For scheduled rides
     request_date = Column(Date, nullable=True)  # Date of the ride request (tomorrow, etc.)
     
+    # Passenger seat requirements
+    seats_needed = Column(Integer, default=1)  # Number of seats the passenger needs
+    
     # Matching relationships
     matched_trip_id = Column(Integer, ForeignKey('trips.id'), nullable=True)
     suggested_hub_id = Column(String, nullable=True)  # Store suggested hub ID
