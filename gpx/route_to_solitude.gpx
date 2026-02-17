@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="SkiPool Test Routes" xmlns="http://www.topografix.com/GPX/1/1">
+  <metadata>
+    <name>Route to Solitude via Big Cottonwood Canyon</name>
+  </metadata>
+  <trk>
+    <name>Sugar House to Solitude</name>
+    <trkseg>
+      <trkpt lat="40.7178" lon="-111.8689">
+        <time>2026-02-15T07:00:00Z</time>
+        <name>Start: Sugar House (geocoded)</name>
+      </trkpt>
+      <trkpt lat="40.7000" lon="-111.8500">
+        <time>2026-02-15T07:01:00Z</time>
+        <name>Heading Southeast</name>
+      </trkpt>
+      <trkpt lat="40.6800" lon="-111.8300">
+        <time>2026-02-15T07:02:00Z</time>
+        <name>Near Holladay</name>
+      </trkpt>
+      <trkpt lat="40.6650" lon="-111.8150">
+        <time>2026-02-15T07:03:00Z</time>
+        <name>Approaching passenger area</name>
+      </trkpt>
+      <trkpt lat="40.6500" lon="-111.8050">
+        <time>2026-02-15T07:04:00Z</time>
+        <name>Highland Dr</name>
+      </trkpt>
+      <trkpt lat="40.6350" lon="-111.8055">
+        <time>2026-02-15T07:03:00Z</time>
+        <name>Approaching Fort Union</name>
+      </trkpt>
+      <trkpt lat="40.6320" lon="-111.8010">
+        <time>2026-02-15T07:04:00Z</time>
+        <name>Fort Union Blvd</name>
+      </trkpt>
+      <trkpt lat="40.6280" lon="-111.7965">
+        <time>2026-02-15T07:05:00Z</time>
+        <name>South on Wasatch</name>
+      </trkpt>
+      <trkpt lat="40.6240" lon="-111.7920">
+        <time>2026-02-15T07:06:00Z</time>
+        <name>7800 S Wasatch</name>
+      </trkpt>
+      <trkpt lat="40.6217" lon="-111.7895">
+        <time>2026-02-15T07:07:00Z</time>
+        <name>Approaching Park and Ride</name>
+      </trkpt>
+      <trkpt lat="40.6194" lon="-111.7870">
+        <time>2026-02-15T07:08:00Z</time>
+        <name>Big Cottonwood Canyon Park and Ride</name>
+      </trkpt>
+      <trkpt lat="40.6172" lon="-111.7795">
+        <time>2026-02-15T07:09:00Z</time>
+        <name>Entering Canyon</name>
+      </trkpt>
+      <trkpt lat="40.6150" lon="-111.7720">
+        <time>2026-02-15T07:10:00Z</time>
+        <name>Canyon Entrance</name>
+      </trkpt>
+      <trkpt lat="40.6135" lon="-111.7560">
+        <time>2026-02-15T07:11:00Z</time>
+        <name>Early Canyon</name>
+      </trkpt>
+      <trkpt lat="40.6120" lon="-111.7400">
+        <time>2026-02-15T07:12:00Z</time>
+        <name>Lower Canyon</name>
+      </trkpt>
+      <trkpt lat="40.6130" lon="-111.7150">
+        <time>2026-02-15T07:13:00Z</time>
+        <name>Winding Up</name>
+      </trkpt>
+      <trkpt lat="40.6140" lon="-111.6900">
+        <time>2026-02-15T07:14:00Z</time>
+        <name>Mid Canyon</name>
+      </trkpt>
+      <trkpt lat="40.6160" lon="-111.6675">
+        <time>2026-02-15T07:15:00Z</time>
+        <name>Climbing</name>
+      </trkpt>
+      <trkpt lat="40.6180" lon="-111.6450">
+        <time>2026-02-15T07:16:00Z</time>
+        <name>Upper Canyon</name>
+      </trkpt>
+      <trkpt lat="40.6190" lon="-111.6185">
+        <time>2026-02-15T07:17:00Z</time>
+        <name>Approaching Resort</name>
+      </trkpt>
+      <trkpt lat="40.6199" lon="-111.5919">
+        <time>2026-02-15T07:18:00Z</time>
+        <name>Arrive: Solitude Resort</name>
+      </trkpt>
+    </trkseg>
+  </trk>
+</gpx>

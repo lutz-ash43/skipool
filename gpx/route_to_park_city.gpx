@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="SkiPool Test Routes" xmlns="http://www.topografix.com/GPX/1/1">
+  <metadata>
+    <name>Route to Park City Mountain</name>
+  </metadata>
+  <trk>
+    <name>Kimball Junction to Park City Mountain</name>
+    <trkseg>
+      <trkpt lat="40.7241" lon="-111.5467">
+        <time>2026-02-15T07:00:00Z</time>
+        <name>Start: Kimball Junction</name>
+      </trkpt>
+      <trkpt lat="40.7150" lon="-111.5420">
+        <time>2026-02-15T07:02:00Z</time>
+        <name>Redstone Dr</name>
+      </trkpt>
+      <trkpt lat="40.7050" lon="-111.5350">
+        <time>2026-02-15T07:04:00Z</time>
+        <name>SR-224 South</name>
+      </trkpt>
+      <trkpt lat="40.6920" lon="-111.5240">
+        <time>2026-02-15T07:06:00Z</time>
+        <name>Kearns Blvd</name>
+      </trkpt>
+      <trkpt lat="40.6750" lon="-111.5150">
+        <time>2026-02-15T07:08:00Z</time>
+        <name>Lowell Ave</name>
+      </trkpt>
+      <trkpt lat="40.6514" lon="-111.5080">
+        <time>2026-02-15T07:10:00Z</time>
+        <name>Arrive: Park City Mountain</name>
+      </trkpt>
+    </trkseg>
+  </trk>
+</gpx>

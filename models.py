@@ -27,7 +27,16 @@ class Trip(Base):
     
     # For scheduled rides
     trip_date = Column(Date, nullable=True)  # Date of the trip (tomorrow, etc.)
-    
+    driver_en_route_at = Column(DateTime, nullable=True)  # When driver tapped "On the way" (scheduled day)
+
+    # Ride lifecycle: pending -> matched -> picked_up -> completed (or cancelled)
+    status = Column(String, default="pending")
+    picked_up_at = Column(DateTime, nullable=True)  # When driver confirmed pickup
+    completed_at = Column(DateTime, nullable=True)  # When ride finished
+
+    # Push notifications
+    push_token = Column(String, nullable=True)  # Expo push notification token
+
     # Timestamps
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, onupdate=datetime.datetime.utcnow)
@@ -41,7 +50,11 @@ class RideRequest(Base):
     pickup_lng = Column(Float)
     pickup_address = Column(String)
     departure_time = Column(String)  # Added: matches schema and used in create_ride_request
-    status = Column(String, default="pending") # pending, matched
+    
+    # Ride lifecycle: pending -> matched -> picked_up -> completed (or cancelled)
+    status = Column(String, default="pending")
+    picked_up_at = Column(DateTime, nullable=True)  # When passenger confirmed pickup
+    completed_at = Column(DateTime, nullable=True)  # When ride finished
     
     # Real-time location tracking (for "Ride Now" mode)
     current_lat = Column(Float, nullable=True)
@@ -57,6 +70,9 @@ class RideRequest(Base):
     # Matching relationships
     matched_trip_id = Column(Integer, ForeignKey('trips.id'), nullable=True)
     suggested_hub_id = Column(String, nullable=True)  # Store suggested hub ID
+    
+    # Push notifications
+    push_token = Column(String, nullable=True)  # Expo push notification token
     
     # Timestamps
     created_at = Column(DateTime, default=datetime.datetime.utcnow)

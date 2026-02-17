@@ -5,7 +5,7 @@ This script adds new columns to existing tables in your GCP database.
 
 IMPORTANT:
 - The database must be running and accessible
-- If running locally, ensure Cloud SQL Proxy is running
+- If running locally, ensure Cloud SQL Proxy is running (or set DATABASE_URL in .env)
 - Backup your database before running this script
 - This script is idempotent (safe to run multiple times)
 
@@ -14,10 +14,15 @@ Usage:
     python migrate_database.py --yes        # Non-interactive (for Cloud Run)
 """
 
-from sqlalchemy import create_engine, text, inspect
-from database import SQLALCHEMY_DATABASE_URL, engine
+from sqlalchemy import text, inspect
+from database import engine, get_connection_string, IS_CLOUD_RUN
 import sys
 import argparse
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 def column_exists(connection, table_name, column_name):
     """Check if a column exists in a table - optimized query"""
@@ -35,7 +40,17 @@ def run_migration():
     import time
     start_time = time.time()
     print("🚀 Starting database migration...")
-    print(f"📡 Connecting to database: {SQLALCHEMY_DATABASE_URL.split('@')[-1]}")
+    
+    if IS_CLOUD_RUN:
+        print(f"📡 Cloud Run environment - connecting via Cloud SQL Connector")
+    else:
+        connection_string = get_connection_string()
+        if connection_string:
+            # Hide password for security
+            safe_connection = connection_string.split('@')[-1] if '@' in connection_string else "local database"
+            print(f"📡 Connecting to database: {safe_connection}")
+        else:
+            print(f"📡 Connecting to database via environment configuration")
     
     try:
         # Set connection timeout
@@ -114,6 +129,37 @@ def run_migration():
                 else:
                     print("  ✓ 'trip_date' already exists")
                 
+                if not column_exists(connection, 'trips', 'driver_en_route_at'):
+                    print("  ➕ Adding 'driver_en_route_at' column...")
+                    connection.execute(text("ALTER TABLE trips ADD COLUMN driver_en_route_at TIMESTAMP"))
+                else:
+                    print("  ✓ 'driver_en_route_at' already exists")
+                
+                # Ride lifecycle fields
+                if not column_exists(connection, 'trips', 'status'):
+                    print("  ➕ Adding 'status' column...")
+                    connection.execute(text("ALTER TABLE trips ADD COLUMN status VARCHAR(50) DEFAULT 'pending'"))
+                else:
+                    print("  ✓ 'status' already exists")
+                
+                if not column_exists(connection, 'trips', 'picked_up_at'):
+                    print("  ➕ Adding 'picked_up_at' column...")
+                    connection.execute(text("ALTER TABLE trips ADD COLUMN picked_up_at TIMESTAMP"))
+                else:
+                    print("  ✓ 'picked_up_at' already exists")
+                
+                if not column_exists(connection, 'trips', 'completed_at'):
+                    print("  ➕ Adding 'completed_at' column...")
+                    connection.execute(text("ALTER TABLE trips ADD COLUMN completed_at TIMESTAMP"))
+                else:
+                    print("  ✓ 'completed_at' already exists")
+                
+                if not column_exists(connection, 'trips', 'push_token'):
+                    print("  ➕ Adding 'push_token' column...")
+                    connection.execute(text("ALTER TABLE trips ADD COLUMN push_token VARCHAR"))
+                else:
+                    print("  ✓ 'push_token' already exists")
+                
                 if not column_exists(connection, 'trips', 'created_at'):
                     print("  ➕ Adding 'created_at' column...")
                     connection.execute(text("ALTER TABLE trips ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"))
@@ -178,6 +224,25 @@ def run_migration():
                     connection.execute(text("ALTER TABLE ride_requests ADD COLUMN suggested_hub_id VARCHAR(10)"))
                 else:
                     print("  ✓ 'suggested_hub_id' already exists")
+                
+                # Ride lifecycle fields
+                if not column_exists(connection, 'ride_requests', 'picked_up_at'):
+                    print("  ➕ Adding 'picked_up_at' column...")
+                    connection.execute(text("ALTER TABLE ride_requests ADD COLUMN picked_up_at TIMESTAMP"))
+                else:
+                    print("  ✓ 'picked_up_at' already exists")
+                
+                if not column_exists(connection, 'ride_requests', 'completed_at'):
+                    print("  ➕ Adding 'completed_at' column...")
+                    connection.execute(text("ALTER TABLE ride_requests ADD COLUMN completed_at TIMESTAMP"))
+                else:
+                    print("  ✓ 'completed_at' already exists")
+                
+                if not column_exists(connection, 'ride_requests', 'push_token'):
+                    print("  ➕ Adding 'push_token' column...")
+                    connection.execute(text("ALTER TABLE ride_requests ADD COLUMN push_token VARCHAR"))
+                else:
+                    print("  ✓ 'push_token' already exists")
                 
                 if not column_exists(connection, 'ride_requests', 'created_at'):
                     print("  ➕ Adding 'created_at' column...")

@@ -8,8 +8,8 @@ Usage:
     python test_connection.py
 """
 
-from sqlalchemy import create_engine, text, inspect
-from database import SQLALCHEMY_DATABASE_URL, engine
+from sqlalchemy import text, inspect
+from database import engine, get_connection_string, IS_CLOUD_RUN
 import sys
 
 def test_connection():
@@ -17,8 +17,16 @@ def test_connection():
     print("=" * 60)
     print("SkiPool Database Connection Test")
     print("=" * 60)
-    print(f"\n📡 Connection String: {SQLALCHEMY_DATABASE_URL.split('@')[-1]}")
-    print("   (Full connection string hidden for security)\n")
+    
+    if IS_CLOUD_RUN:
+        print(f"\n📡 Cloud Run environment - connecting via Cloud SQL Connector\n")
+    else:
+        connection_string = get_connection_string()
+        if connection_string and '@' in connection_string:
+            print(f"\n📡 Connection String: {connection_string.split('@')[-1]}")
+            print("   (Full connection string hidden for security)\n")
+        else:
+            print(f"\n📡 Connecting via environment configuration\n")
     
     try:
         print("🔄 Attempting to connect...")

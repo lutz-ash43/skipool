@@ -6,10 +6,11 @@ FROM python:3.12-slim
 # Set working directory
 WORKDIR /app
 
-# Install only required dependencies for migration
+# Install required dependencies for migration
 RUN pip install --no-cache-dir \
     sqlalchemy==2.0.44 \
-    psycopg2-binary==2.9.11
+    cloud-sql-python-connector[pg8000]==1.17.0 \
+    python-dotenv==1.0.1
 
 # Copy migration script and database config
 COPY migrate_database.py .

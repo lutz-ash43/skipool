@@ -1,20 +1,60 @@
 from fastapi import FastAPI, Query, Depends, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text, inspect, func
 from typing import List, Optional, Tuple
 import math
+import time
 from datetime import datetime, date, timedelta
 from geopy.geocoders import Nominatim
+import httpx
 
 # Database & Models
-from database import engine, get_db, Base
+from database import engine, get_db, Base, verify_connection
 from models import Trip, RideRequest
 import schemas
+import logging
 
-Base.metadata.create_all(bind=engine)
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Tables are managed by migrations / existing DB; no create_all at startup (Cloud Run has no DB on 127.0.0.1 at import time)
 
 app = FastAPI()
-geolocator = Nominatim(user_agent="skipool_app", timeout=10)  # 10 second timeout
+geolocator = Nominatim(user_agent="skipool_app", timeout=5)  # 5 second timeout (reduced for local dev)
+
+# CORS: allow simulator, localhost, and common dev origins so requests don't stall on preflight
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Verify database connection on startup before serving traffic."""
+    logger.info("=" * 60)
+    logger.info("SkiPool API Starting Up")
+    logger.info("=" * 60)
+    
+    try:
+        logger.info("Verifying database connection...")
+        verify_connection(engine)
+        logger.info("✅ Database connection verified - ready to serve traffic")
+        logger.info("=" * 60)
+    except Exception as e:
+        logger.error("=" * 60)
+        logger.error("❌ STARTUP FAILED: Database connection could not be established")
+        logger.error(f"Error: {e}")
+        logger.error("=" * 60)
+        logger.error("\n⚠️  The application will not function correctly without a database connection.")
+        logger.error("Please fix the connection issue and restart the application.\n")
+        # Don't raise - let the app start but log the error prominently
+        # This allows health checks to work even if DB is temporarily down
 
 
 def _is_departure_now(val) -> bool:
@@ -29,18 +69,25 @@ def _geocode_address(raw: str) -> Tuple[Optional[float], Optional[float]]:
     s = (raw or "").strip()
     if not s:
         return None, None
+    
+    logger.info(f"🗺️  Geocoding address: '{s}'")
     queries = [
         f"{s}, Utah",
         s,
         f"{s}, Utah, USA",
     ]
-    for q in queries:
+    for i, q in enumerate(queries, 1):
         try:
-            loc = geolocator.geocode(q, timeout=10)
+            logger.debug(f"Attempt {i}/3: geocoding '{q}'")
+            loc = geolocator.geocode(q, timeout=5)  # Reduced from 10 to 5 seconds
             if loc and loc.latitude is not None and loc.longitude is not None:
+                logger.info(f"✅ Geocoded '{s}' -> ({loc.latitude}, {loc.longitude})")
                 return float(loc.latitude), float(loc.longitude)
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Geocoding attempt {i} failed: {type(e).__name__}")
             continue
+    
+    logger.warning(f"❌ Could not geocode address: '{s}'")
     return None, None
 
 
@@ -57,16 +104,96 @@ RESORTS_DATA = [
 ]
 
 HUBS = {
-    "h1": {"name": "Historic Sandy Station", "lat": 40.5897, "lng": -111.8856},
-    "h2": {"name": "9400 S. Highland Dr.", "lat": 40.5815, "lng": -111.8085},
-    "h3": {"name": "Midvale Fort Union Station", "lat": 40.6192, "lng": -111.8983},
-    "h4": {"name": "6200 S. Wasatch Blvd. (Swamp Lot)", "lat": 40.6375, "lng": -111.7997},
-    "h5": {"name": "Big Cottonwood Canyon P&R", "lat": 40.6194, "lng": -111.7870},
-    "h6": {"name": "Richardson Flat", "lat": 40.6711, "lng": -111.4496},
-    "h7": {"name": "Ecker Hill P&R", "lat": 40.7461, "lng": -111.5734},
-    "h8": {"name": "Kimball Junction Transit Center", "lat": 40.7241, "lng": -111.5467},
-    "h9": {"name": "Park City High School", "lat": 40.6587, "lng": -111.5034},
-    "h10": {"name": "Jeremy Ranch P&R", "lat": 40.7589, "lng": -111.5761}
+    "h1": {
+        "name": "Historic Sandy Station",
+        "lat": 40.5897,
+        "lng": -111.8856,
+        "address": "8662 S. 255 E., Sandy, UT 84070",
+        "transit": True,
+        "bus_routes": ["UTA TRAX Red Line", "UTA 953 (Ski Bus)"],
+        "description": "UTA TRAX station with ski bus connections"
+    },
+    "h2": {
+        "name": "9400 S. Highland Dr.",
+        "lat": 40.5815,
+        "lng": -111.8085,
+        "address": "9400 S. Highland Dr., Sandy, UT 84092",
+        "transit": True,
+        "bus_routes": ["UTA 953 (Ski Bus)"],
+        "description": "UTA Park & Ride with ski bus service"
+    },
+    "h3": {
+        "name": "Midvale Fort Union Station",
+        "lat": 40.6192,
+        "lng": -111.8983,
+        "address": "7200 S. 1300 E., Midvale, UT 84047",
+        "transit": True,
+        "bus_routes": ["UTA TRAX Red Line", "UTA 953 (Ski Bus)"],
+        "description": "UTA TRAX station with ski bus connections"
+    },
+    "h4": {
+        "name": "6200 S. Wasatch Blvd. (Swamp Lot)",
+        "lat": 40.6375,
+        "lng": -111.7997,
+        "address": "6200 S. Wasatch Blvd., Salt Lake City, UT 84121",
+        "transit": True,
+        "bus_routes": ["UTA 953 (Ski Bus)", "UTA 994 (Ski Bus)"],
+        "description": "Popular ski bus pickup location"
+    },
+    "h5": {
+        "name": "Big Cottonwood Canyon P&R",
+        "lat": 40.6194,
+        "lng": -111.7870,
+        "address": "6450 S. Wasatch Blvd., Salt Lake City, UT 84121",
+        "transit": True,
+        "bus_routes": ["UTA 953 (Ski Bus)", "UTA 994 (Ski Bus)"],
+        "description": "UTA Park & Ride at canyon entrance"
+    },
+    "h6": {
+        "name": "Richardson Flat",
+        "lat": 40.6711,
+        "lng": -111.4496,
+        "address": "Richardson Flat Rd., Park City, UT 84098",
+        "transit": True,
+        "bus_routes": ["Park City Transit"],
+        "description": "Park & Ride with free Park City Transit"
+    },
+    "h7": {
+        "name": "Ecker Hill P&R",
+        "lat": 40.7461,
+        "lng": -111.5734,
+        "address": "I-80 Exit 146, Park City, UT 84098",
+        "transit": True,
+        "bus_routes": ["Park City Transit"],
+        "description": "Park & Ride with free Park City Transit"
+    },
+    "h8": {
+        "name": "Kimball Junction Transit Center",
+        "lat": 40.7241,
+        "lng": -111.5467,
+        "address": "1751 Sidewinder Dr., Park City, UT 84060",
+        "transit": True,
+        "bus_routes": ["Park City Transit", "UTA 902"],
+        "description": "Major transit hub with multiple bus routes"
+    },
+    "h9": {
+        "name": "Park City High School",
+        "lat": 40.6587,
+        "lng": -111.5034,
+        "address": "1752 Kearns Blvd., Park City, UT 84060",
+        "transit": True,
+        "bus_routes": ["Park City Transit"],
+        "description": "Park & Ride with free Park City Transit"
+    },
+    "h10": {
+        "name": "Jeremy Ranch P&R",
+        "lat": 40.7589,
+        "lng": -111.5761,
+        "address": "I-80 Exit 141, Park City, UT 84098",
+        "transit": True,
+        "bus_routes": ["Park City Transit"],
+        "description": "Park & Ride with free Park City Transit"
+    }
 }
 
 RESORT_HUB_MAP = {
@@ -104,6 +231,49 @@ def get_cross_track_distance(d_lat, d_lon, r_lat, r_lon, p_lat, p_lon):
     bearing_dp = get_bearing(d_lat, d_lon, p_lat, p_lon)
     return abs(math.asin(math.sin(dist_dp / R) * math.sin(math.radians(bearing_dp - bearing_dr))) * R)
 
+def is_ahead_on_route(driver_lat, driver_lng, resort_lat, resort_lng, point_lat, point_lng) -> bool:
+    """True if point projects onto the driver->resort segment (not behind driver or past resort).
+    Uses along-track projection to ensure passenger is between driver and resort."""
+    # Calculate direction vector from driver to resort
+    dx = math.radians(resort_lng - driver_lng) * math.cos(math.radians((driver_lat + resort_lat) / 2))
+    dy = math.radians(resort_lat - driver_lat)
+    
+    # Calculate direction vector from driver to point
+    px = math.radians(point_lng - driver_lng) * math.cos(math.radians((driver_lat + point_lat) / 2))
+    py = math.radians(point_lat - driver_lat)
+    
+    # Project point onto driver->resort line segment
+    dot = px * dx + py * dy
+    seg_len_sq = dx * dx + dy * dy
+    
+    if seg_len_sq == 0:
+        return False
+    
+    # Parameter t: 0 = at driver, 1 = at resort
+    t = dot / seg_len_sq
+    
+    # Only match if passenger is between driver and resort (0 <= t <= 1)
+    return 0.0 <= t <= 1.0
+
+# --- ROOT & HEALTH ---
+@app.get("/")
+def root():
+    """Root endpoint - API info and links."""
+    return {
+        "name": "SkiPool API",
+        "docs": "/docs",
+        "health": "/health",
+        "health_db": "/health/db",
+        "resorts": "/resorts/",
+    }
+
+
+@app.get("/health")
+def health():
+    """Simple health check (no DB)."""
+    return {"status": "ok"}
+
+
 # --- UTILITY ENDPOINTS ---
 @app.get("/resorts/")
 def get_resorts():
@@ -113,6 +283,127 @@ def get_resorts():
 def get_hubs_for_resort(resort: str):
     allowed_ids = RESORT_HUB_MAP.get(resort, [])
     return {hid: HUBS[hid] for hid in allowed_ids if hid in HUBS}
+
+@app.get("/hubs-for-match/")
+def get_hubs_for_match(trip_id: int, request_id: int, db: Session = Depends(get_db)):
+    """Get all valid hubs for a specific trip-request match pair, scored by distance.
+    Allows passenger to see all options and choose if auto-selected hub doesn't work."""
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found")
+    
+    request = db.query(RideRequest).filter(RideRequest.id == request_id).first()
+    if not request:
+        raise HTTPException(status_code=404, detail="Ride request not found")
+    
+    if not trip.start_lat or not trip.start_lng or not request.pickup_lat or not request.pickup_lng:
+        raise HTTPException(status_code=400, detail="Missing location data for trip or request")
+    
+    resort_coords = next((r for r in RESORTS_DATA if r["name"] == trip.resort), None)
+    if not resort_coords:
+        raise HTTPException(status_code=404, detail="Resort not found")
+    
+    valid_hub_ids = RESORT_HUB_MAP.get(trip.resort, [])
+    HUB_ROUTE_KM = 5.0
+    scored_hubs = []
+    
+    # Score all valid hubs for this resort
+    for hub_id in valid_hub_ids:
+        if hub_id not in HUBS:
+            continue
+        hub = HUBS[hub_id]
+        
+        # Check if hub is within 5km cross-track of driver's route
+        driver_xtd = get_cross_track_distance(
+            trip.start_lat, trip.start_lng,
+            resort_coords["lat"], resort_coords["lng"],
+            hub["lat"], hub["lng"]
+        )
+        
+        if driver_xtd > HUB_ROUTE_KM:
+            continue
+        
+        # Calculate distances
+        dist_driver = haversine(trip.start_lat, trip.start_lng, hub["lat"], hub["lng"])
+        dist_passenger = haversine(request.pickup_lat, request.pickup_lng, hub["lat"], hub["lng"])
+        
+        # Parse departure times for time difference
+        time_diff = time_difference_minutes(trip.departure_time or "", request.departure_time or "")
+        if time_diff is None:
+            time_diff = 0
+        
+        # Score: lower is better (distance + small time factor)
+        score = dist_driver + dist_passenger + (time_diff * 0.1)
+        
+        scored_hubs.append({
+            "id": hub_id,
+            "name": hub["name"],
+            "lat": hub["lat"],
+            "lng": hub["lng"],
+            "address": hub.get("address", ""),
+            "transit": hub.get("transit", False),
+            "bus_routes": hub.get("bus_routes", []),
+            "description": hub.get("description", ""),
+            "driver_distance_km": round(dist_driver, 2),
+            "passenger_distance_km": round(dist_passenger, 2),
+            "total_distance_km": round(dist_driver + dist_passenger, 2),
+            "score": round(score, 2)
+        })
+    
+    # Include driver's start location as fallback option
+    if trip.start_lat and trip.start_lng:
+        dist_passenger = haversine(request.pickup_lat, request.pickup_lng, trip.start_lat, trip.start_lng)
+        scored_hubs.append({
+            "id": "driver_start",
+            "name": "Meet at driver's start",
+            "lat": trip.start_lat,
+            "lng": trip.start_lng,
+            "address": trip.start_location_text or "Driver's starting location",
+            "transit": False,
+            "bus_routes": [],
+            "description": "Meet at the driver's starting location (no return transit available)",
+            "driver_distance_km": 0.0,
+            "passenger_distance_km": round(dist_passenger, 2),
+            "total_distance_km": round(dist_passenger, 2),
+            "score": round(dist_passenger, 2)
+        })
+    
+    # Sort by score (lower is better)
+    scored_hubs.sort(key=lambda x: x["score"])
+    
+    return {
+        "trip_id": trip_id,
+        "request_id": request_id,
+        "resort": trip.resort,
+        "hubs": scored_hubs
+    }
+
+@app.get("/health/schema")
+def check_database_schema(db: Session = Depends(get_db)):
+    """Return actual column names for trips and ride_requests. Use this to verify migrations applied."""
+    try:
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+        schema = {}
+        for table in ("trips", "ride_requests"):
+            if table in tables:
+                schema[table] = [c["name"] for c in inspector.get_columns(table)]
+            else:
+                schema[table] = None
+        return {
+            "status": "ok",
+            "tables": schema,
+            "ride_requests_has_picked_up_at": (
+                "ride_requests" in schema and schema["ride_requests"] is not None
+                and "picked_up_at" in schema["ride_requests"]
+            ),
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+        }
+
 
 @app.get("/health/db")
 def check_database_health(db: Session = Depends(get_db)):
@@ -152,9 +443,86 @@ def check_database_health(db: Session = Depends(get_db)):
             "timestamp": datetime.utcnow().isoformat()
         }
 
+# --- PUSH NOTIFICATION HELPERS ---
+async def send_expo_push_notification(push_token: str, title: str, body: str, data: dict = None):
+    """Send a push notification via Expo's push service"""
+    if not push_token or not push_token.startswith('ExponentPushToken'):
+        logger.warning(f"Invalid push token format: {push_token}")
+        return False
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                'https://exp.host/--/api/v2/push/send',
+                json={
+                    'to': push_token,
+                    'sound': 'default',
+                    'title': title,
+                    'body': body,
+                    'data': data or {},
+                },
+                headers={'Content-Type': 'application/json'},
+                timeout=10.0
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('data', {}).get('status') == 'ok':
+                    logger.info(f"Push notification sent successfully to {push_token[:20]}...")
+                    return True
+                else:
+                    logger.warning(f"Push notification failed: {result}")
+                    return False
+            else:
+                logger.error(f"Expo push API error: {response.status_code} - {response.text}")
+                return False
+    except Exception as e:
+        logger.error(f"Error sending push notification: {e}")
+        return False
+
+# --- PUSH NOTIFICATION ENDPOINTS ---
+@app.post("/register-push-token")
+def register_push_token(
+    token: str,
+    trip_id: Optional[int] = None,
+    request_id: Optional[int] = None,
+    db: Session = Depends(get_db)
+):
+    """Register an Expo push token for a trip or ride request"""
+    if not token:
+        raise HTTPException(status_code=400, detail="Push token is required")
+    
+    if not trip_id and not request_id:
+        raise HTTPException(status_code=400, detail="Either trip_id or request_id must be provided")
+    
+    try:
+        if trip_id:
+            trip = db.query(Trip).filter(Trip.id == trip_id).first()
+            if not trip:
+                raise HTTPException(status_code=404, detail="Trip not found")
+            trip.push_token = token
+            logger.info(f"Registered push token for trip {trip_id}")
+        
+        if request_id:
+            request = db.query(RideRequest).filter(RideRequest.id == request_id).first()
+            if not request:
+                raise HTTPException(status_code=404, detail="Ride request not found")
+            request.push_token = token
+            logger.info(f"Registered push token for request {request_id}")
+        
+        db.commit()
+        return {"success": True, "message": "Push token registered"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error registering push token: {e}")
+        raise HTTPException(status_code=500, detail="Failed to register push token")
+
 # --- TRIP ENDPOINTS (DRIVER) ---
 @app.post("/trips/", response_model=schemas.Trip)
 def create_trip(trip: schemas.TripCreate, db: Session = Depends(get_db)):
+    t0 = time.perf_counter()
+    logger.info(f"📥 POST /trips/ received (driver={getattr(trip, 'driver_name', '?')}, resort={getattr(trip, 'resort', '?')}, has_lat_lng={trip.current_lat is not None and trip.current_lng is not None})")
     is_scheduled = not trip.is_realtime
     lat, lng = trip.current_lat, trip.current_lng
     
@@ -194,16 +562,60 @@ def create_trip(trip: schemas.TripCreate, db: Session = Depends(get_db)):
     db.add(new_trip)
     db.commit()
     db.refresh(new_trip)
+    elapsed = time.perf_counter() - t0
+    logger.info(f"✅ POST /trips/ completed in {elapsed:.2f}s (trip_id={new_trip.id})")
     return new_trip
+
+@app.get("/trips/{trip_id}", response_model=schemas.Trip)
+def get_trip(trip_id: int, db: Session = Depends(get_db)):
+    """Get a trip by ID"""
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found")
+    return trip
+
+@app.patch("/trips/{trip_id}")
+def update_trip(trip_id: int, updates: dict, db: Session = Depends(get_db)):
+    """Update trip fields. Used for testing/debugging."""
+    db_trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not db_trip:
+        raise HTTPException(status_code=404, detail="Trip not found")
+    
+    # Only allow safe fields to be updated
+    allowed_fields = {'is_realtime', 'status', 'available_seats'}
+    for key, value in updates.items():
+        if key in allowed_fields and hasattr(db_trip, key):
+            setattr(db_trip, key, value)
+    
+    db.commit()
+    db.refresh(db_trip)
+    return {"message": "Trip updated", "trip_id": trip_id}
 
 @app.delete("/trips/{trip_id}")
 def delete_trip(trip_id: int, db: Session = Depends(get_db)):
     db_trip = db.query(Trip).filter(Trip.id == trip_id).first()
     if not db_trip:
         raise HTTPException(status_code=404, detail="Trip not found")
+    
+    # Clear any ride_requests that reference this trip (foreign key constraint)
+    db.query(RideRequest).filter(RideRequest.matched_trip_id == trip_id).update(
+        {"matched_trip_id": None},
+        synchronize_session=False
+    )
+    
     db.delete(db_trip)
     db.commit()
     return {"message": "Trip deleted successfully"}
+
+@app.delete("/ride-requests/{request_id}")
+def delete_ride_request(request_id: int, db: Session = Depends(get_db)):
+    db_request = db.query(RideRequest).filter(RideRequest.id == request_id).first()
+    if not db_request:
+        raise HTTPException(status_code=404, detail="Ride request not found")
+    
+    db.delete(db_request)
+    db.commit()
+    return {"message": "Ride request deleted successfully"}
 
 @app.post("/trips/{trip_id}/book")
 def book_trip(trip_id: int, db: Session = Depends(get_db)):
@@ -235,6 +647,7 @@ def accept_driver_match(request_id: int, trip_id: int = Query(...), db: Session 
     
     request.matched_trip_id = trip_id
     request.status = "matched"
+    trip.status = "matched"
     trip.available_seats -= 1
     db.commit()
     db.refresh(request)
@@ -283,6 +696,7 @@ def accept_passenger_match(trip_id: int, request_id: int = Query(...), db: Sessi
     
     request.matched_trip_id = trip_id
     request.status = "matched"
+    trip.status = "matched"
     trip.available_seats -= 1
     db.commit()
     db.refresh(request)
@@ -291,7 +705,11 @@ def accept_passenger_match(trip_id: int, request_id: int = Query(...), db: Sessi
 
 @app.get("/trips/{trip_id}/matched-passenger")
 def get_matched_passenger_location(trip_id: int, db: Session = Depends(get_db)):
-    """Get the matched passenger's current location for a driver"""
+    """Get the matched passenger's current location for a driver.
+    
+    Returns passenger navigation target (pickup for Ride Now, hub/current for scheduled),
+    plus distance_km and near_pickup flag to trigger pickup confirmation prompt.
+    """
     trip = db.query(Trip).filter(Trip.id == trip_id).first()
     if not trip:
         raise HTTPException(status_code=404, detail="Trip not found")
@@ -310,6 +728,19 @@ def get_matched_passenger_location(trip_id: int, db: Session = Depends(get_db)):
     nav_lat = request.pickup_lat if use_pickup else (request.current_lat or request.pickup_lat)
     nav_lng = request.pickup_lng if use_pickup else (request.current_lng or request.pickup_lng)
     
+    # Calculate driver distance to pickup/nav target for proximity notifications
+    distance_km = None
+    near_pickup = False
+    
+    # Get driver's current position (use current if available, else start)
+    driver_lat = trip.current_lat if trip.current_lat else trip.start_lat
+    driver_lng = trip.current_lng if trip.current_lng else trip.start_lng
+    
+    if driver_lat and driver_lng and nav_lat and nav_lng:
+        distance_km = haversine(driver_lat, driver_lng, nav_lat, nav_lng)
+        # Within 500m (0.5 km) - show pickup confirmation prompt; stays active until driver confirms
+        near_pickup = distance_km < 0.5
+    
     return {
         "matched": True,
         "passenger_name": request.passenger_name,
@@ -317,7 +748,9 @@ def get_matched_passenger_location(trip_id: int, db: Session = Depends(get_db)):
         "current_lng": nav_lng,
         "pickup_lat": request.pickup_lat,
         "pickup_lng": request.pickup_lng,
-        "last_location_update": request.last_location_update.isoformat() if request.last_location_update else None
+        "last_location_update": request.last_location_update.isoformat() if request.last_location_update else None,
+        "distance_km": round(distance_km, 2) if distance_km is not None else None,
+        "near_pickup": near_pickup
     }
 
 @app.get("/trips/{trip_id}/scheduled-match")
@@ -333,12 +766,30 @@ def get_scheduled_match_driver(trip_id: int, db: Session = Depends(get_db)):
     if not request or not request.suggested_hub_id:
         return {"matched": False}
     if request.suggested_hub_id == "driver_start" and trip.start_lat and trip.start_lng:
-        hub = {"id": "driver_start", "name": "Meet at driver's start", "lat": trip.start_lat, "lng": trip.start_lng}
+        hub = {
+            "id": "driver_start",
+            "name": "Meet at driver's start",
+            "lat": trip.start_lat,
+            "lng": trip.start_lng,
+            "address": trip.start_location_text or "Driver's starting location",
+            "transit": False,
+            "bus_routes": [],
+            "description": "Meet at the driver's starting location (no return transit available)"
+        }
     else:
         hub_data = HUBS.get(request.suggested_hub_id)
         if not hub_data:
             return {"matched": False}
-        hub = {"id": request.suggested_hub_id, "name": hub_data["name"], "lat": hub_data["lat"], "lng": hub_data["lng"]}
+        hub = {
+            "id": request.suggested_hub_id,
+            "name": hub_data["name"],
+            "lat": hub_data["lat"],
+            "lng": hub_data["lng"],
+            "address": hub_data.get("address", ""),
+            "transit": hub_data.get("transit", False),
+            "bus_routes": hub_data.get("bus_routes", []),
+            "description": hub_data.get("description", "")
+        }
     return {
         "matched": True,
         "trip_id": trip.id,
@@ -348,8 +799,192 @@ def get_scheduled_match_driver(trip_id: int, db: Session = Depends(get_db)):
         "hub": hub,
         "driver_departure_time": trip.departure_time,
         "trip_date": str(trip.trip_date) if trip.trip_date else None,
+        "driver_on_the_way": trip.driver_en_route_at is not None,
         "current_lat": request.current_lat,
         "current_lng": request.current_lng,
+    }
+
+@app.post("/trips/{trip_id}/start-en-route")
+async def start_trip_en_route(trip_id: int, db: Session = Depends(get_db)):
+    """Driver marks scheduled trip as 'On the way'. Only allowed on the scheduled day. Enables sharing driver location to matched passenger(s)."""
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found")
+    if trip.is_realtime:
+        raise HTTPException(status_code=400, detail="This endpoint is for scheduled trips only.")
+    if not trip.trip_date:
+        raise HTTPException(status_code=400, detail="Trip has no scheduled date.")
+    today = date.today()
+    if not _date_eq(trip.trip_date, today):
+        raise HTTPException(status_code=400, detail="Only available on the scheduled day.")
+    if trip.driver_en_route_at:
+        return {"en_route": True, "started_at": trip.driver_en_route_at.isoformat()}
+    trip.driver_en_route_at = datetime.utcnow()
+    if trip.start_lat is not None and trip.start_lng is not None and (trip.current_lat is None or trip.current_lng is None):
+        trip.current_lat = trip.start_lat
+        trip.current_lng = trip.start_lng
+        trip.last_location_update = datetime.utcnow()
+    db.commit()
+    db.refresh(trip)
+    
+    # Send push notification to matched passenger(s)
+    matched_requests = db.query(RideRequest).filter(
+        RideRequest.matched_trip_id == trip_id,
+        RideRequest.status == "matched"
+    ).all()
+    
+    for request in matched_requests:
+        if request.push_token:
+            await send_expo_push_notification(
+                push_token=request.push_token,
+                title="Your driver is on the way!",
+                body=f"{trip.driver_name} is heading to the meeting point. Track their location in the app.",
+                data={
+                    "request_id": request.id,
+                    "trip_id": trip_id,
+                    "action": "track_driver"
+                }
+            )
+    
+    return {"en_route": True, "started_at": trip.driver_en_route_at.isoformat()}
+
+@app.post("/trips/{trip_id}/confirm-pickup")
+def confirm_trip_pickup(trip_id: int, db: Session = Depends(get_db)):
+    """Driver confirms they picked up the passenger. Sets picked_up_at on trip.
+    Only allowed when matched. For Ride Now: always. For Scheduled: after 'On the way'."""
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found")
+    
+    # Find matched passenger
+    request = db.query(RideRequest).filter(
+        RideRequest.matched_trip_id == trip_id,
+        RideRequest.status == "matched"
+    ).first()
+    if not request:
+        raise HTTPException(status_code=400, detail="No matched passenger found for this trip")
+    
+    # For scheduled trips, must be en-route first
+    if not trip.is_realtime and not trip.driver_en_route_at:
+        raise HTTPException(status_code=400, detail="Driver must be 'On the way' before confirming pickup for scheduled rides")
+    
+    # Set driver's pickup confirmation
+    if not trip.picked_up_at:
+        trip.picked_up_at = datetime.utcnow()
+    
+    # If both parties confirmed, transition status to picked_up
+    if trip.picked_up_at and request.picked_up_at:
+        trip.status = "picked_up"
+        request.status = "picked_up"
+    else:
+        trip.status = "matched"
+    
+    db.commit()
+    db.refresh(trip)
+    db.refresh(request)
+    
+    return {
+        "message": "Pickup confirmed by driver",
+        "driver_confirmed": True,
+        "passenger_confirmed": request.picked_up_at is not None,
+        "both_confirmed": trip.status == "picked_up",
+        "picked_up_at": trip.picked_up_at.isoformat() if trip.picked_up_at else None
+    }
+
+@app.post("/ride-requests/{request_id}/confirm-pickup")
+def confirm_request_pickup(request_id: int, db: Session = Depends(get_db)):
+    """Passenger confirms they were picked up. Sets picked_up_at on request.
+    If both parties confirm, status transitions to picked_up."""
+    request = db.query(RideRequest).filter(RideRequest.id == request_id).first()
+    if not request:
+        raise HTTPException(status_code=404, detail="Ride request not found")
+    
+    if not request.matched_trip_id:
+        raise HTTPException(status_code=400, detail="Ride request has no matched trip")
+    
+    trip = db.query(Trip).filter(Trip.id == request.matched_trip_id).first()
+    if not trip:
+        raise HTTPException(status_code=404, detail="Matched trip not found")
+    
+    # Set passenger's pickup confirmation
+    if not request.picked_up_at:
+        request.picked_up_at = datetime.utcnow()
+    
+    # If both parties confirmed, transition status to picked_up
+    if trip.picked_up_at and request.picked_up_at:
+        trip.status = "picked_up"
+        request.status = "picked_up"
+    else:
+        request.status = "matched"
+    
+    db.commit()
+    db.refresh(trip)
+    db.refresh(request)
+    
+    return {
+        "message": "Pickup confirmed by passenger",
+        "passenger_confirmed": True,
+        "driver_confirmed": trip.picked_up_at is not None,
+        "both_confirmed": request.status == "picked_up",
+        "picked_up_at": request.picked_up_at.isoformat() if request.picked_up_at else None
+    }
+
+@app.post("/trips/{trip_id}/complete")
+def complete_trip(trip_id: int, db: Session = Depends(get_db)):
+    """Driver marks ride as completed (arrived at resort). Sets completed_at, status to completed, and frees the seat."""
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found")
+    
+    if trip.status == "completed":
+        return {"message": "Trip already completed", "completed_at": trip.completed_at.isoformat() if trip.completed_at else None}
+    
+    # Find matched passenger(s)
+    requests = db.query(RideRequest).filter(
+        RideRequest.matched_trip_id == trip_id
+    ).all()
+    
+    # Mark trip as completed
+    trip.completed_at = datetime.utcnow()
+    trip.status = "completed"
+    
+    # Mark all matched requests as completed
+    for request in requests:
+        if request.status != "completed":
+            request.completed_at = datetime.utcnow()
+            request.status = "completed"
+    
+    db.commit()
+    db.refresh(trip)
+    
+    return {
+        "message": "Ride completed",
+        "status": trip.status,
+        "completed_at": trip.completed_at.isoformat() if trip.completed_at else None,
+        "passengers_completed": len(requests)
+    }
+
+@app.post("/ride-requests/{request_id}/complete")
+def complete_ride_request(request_id: int, db: Session = Depends(get_db)):
+    """Passenger marks ride as completed. Sets completed_at and status to completed."""
+    request = db.query(RideRequest).filter(RideRequest.id == request_id).first()
+    if not request:
+        raise HTTPException(status_code=404, detail="Ride request not found")
+    
+    if request.status == "completed":
+        return {"message": "Ride already completed", "completed_at": request.completed_at.isoformat() if request.completed_at else None}
+    
+    # Mark request as completed
+    request.completed_at = datetime.utcnow()
+    request.status = "completed"
+    
+    db.commit()
+    db.refresh(request)
+    
+    return {
+        "message": "Ride completed by passenger",
+        "status": request.status,
+        "completed_at": request.completed_at.isoformat() if request.completed_at else None
     }
 
 @app.get("/ride-requests/{request_id}/scheduled-match")
@@ -364,12 +999,30 @@ def get_scheduled_match_passenger(request_id: int, db: Session = Depends(get_db)
     if not trip:
         return {"matched": False}
     if request.suggested_hub_id == "driver_start" and trip.start_lat and trip.start_lng:
-        hub = {"id": "driver_start", "name": "Meet at driver's start", "lat": trip.start_lat, "lng": trip.start_lng}
+        hub = {
+            "id": "driver_start",
+            "name": "Meet at driver's start",
+            "lat": trip.start_lat,
+            "lng": trip.start_lng,
+            "address": trip.start_location_text or "Driver's starting location",
+            "transit": False,
+            "bus_routes": [],
+            "description": "Meet at the driver's starting location (no return transit available)"
+        }
     else:
         hub_data = HUBS.get(request.suggested_hub_id) if request.suggested_hub_id else None
         if not hub_data:
             return {"matched": False}
-        hub = {"id": request.suggested_hub_id, "name": hub_data["name"], "lat": hub_data["lat"], "lng": hub_data["lng"]}
+        hub = {
+            "id": request.suggested_hub_id,
+            "name": hub_data["name"],
+            "lat": hub_data["lat"],
+            "lng": hub_data["lng"],
+            "address": hub_data.get("address", ""),
+            "transit": hub_data.get("transit", False),
+            "bus_routes": hub_data.get("bus_routes", []),
+            "description": hub_data.get("description", "")
+        }
     return {
         "matched": True,
         "trip_id": trip.id,
@@ -379,26 +1032,53 @@ def get_scheduled_match_passenger(request_id: int, db: Session = Depends(get_db)
         "hub": hub,
         "driver_departure_time": trip.departure_time,
         "request_date": str(request.request_date) if request.request_date else None,
-        "current_lat": trip.current_lat,
-        "current_lng": trip.current_lng,
+        "driver_on_the_way": trip.driver_en_route_at is not None,
+        "current_lat": trip.current_lat if trip.driver_en_route_at else None,
+        "current_lng": trip.current_lng if trip.driver_en_route_at else None,
     }
 
 @app.put("/trips/{trip_id}/location", response_model=schemas.Trip)
 def update_trip_location(trip_id: int, location: schemas.LocationUpdate, db: Session = Depends(get_db)):
-    """Update driver's current location. Allowed for Ride Now or scheduled trips on the day-of (en route)."""
+    """Update driver's current location. Ride Now: always. Scheduled: only on the day-of after driver has tapped 'On the way'."""
     db_trip = db.query(Trip).filter(Trip.id == trip_id).first()
     if not db_trip:
         raise HTTPException(status_code=404, detail="Trip not found")
     today = date.today()
-    can_update = (
-        db_trip.is_realtime
-        or (not db_trip.is_realtime and db_trip.trip_date is not None and _normalize_date(db_trip.trip_date) == today)
-    )
+    if db_trip.is_realtime:
+        can_update = True
+    else:
+        # Scheduled: only on scheduled day and only after driver has started en route
+        can_update = (
+            db_trip.trip_date is not None
+            and _normalize_date(db_trip.trip_date) == today
+            and db_trip.driver_en_route_at is not None
+        )
     if not can_update:
         raise HTTPException(
             status_code=400,
-            detail="Location updates only for Ride Now trips or scheduled trips on the day of the ride."
+            detail="Location updates only for Ride Now or for scheduled trips after you tap 'On the way' on the day of the ride."
         )
+
+    # When trip has a matched passenger, only accept updates that don't move driver farther from pickup.
+    # This prevents the app's location (e.g. simulator reporting start) from overwriting script/progress.
+    matched_req = db.query(RideRequest).filter(
+        RideRequest.matched_trip_id == trip_id,
+        RideRequest.status == "matched"
+    ).first()
+    if matched_req and matched_req.pickup_lat and matched_req.pickup_lng and location.current_lat and location.current_lng:
+        nav_lat = matched_req.pickup_lat if _is_departure_now(matched_req.departure_time) else (matched_req.current_lat or matched_req.pickup_lat)
+        nav_lng = matched_req.pickup_lng if _is_departure_now(matched_req.departure_time) else (matched_req.current_lng or matched_req.pickup_lng)
+        if nav_lat and nav_lng:
+            driver_lat = db_trip.current_lat or db_trip.start_lat
+            driver_lng = db_trip.current_lng or db_trip.start_lng
+            dist_new = haversine(location.current_lat, location.current_lng, nav_lat, nav_lng)
+            if driver_lat is not None and driver_lng is not None:
+                dist_current = haversine(driver_lat, driver_lng, nav_lat, nav_lng)
+                if dist_new > dist_current:
+                    # Reject update that moves driver farther from pickup (e.g. app sending stale start)
+                    db.refresh(db_trip)
+                    return db_trip
+
     db_trip.current_lat = location.current_lat
     db_trip.current_lng = location.current_lng
     db_trip.last_location_update = datetime.utcnow()
@@ -435,7 +1115,7 @@ def match_passengers(trip_id: int, resort: str, db: Session = Depends(get_db)):
     requests = db.query(RideRequest).filter(
         RideRequest.resort == resort,
         RideRequest.status == "pending",
-        func.lower(func.coalesce(RideRequest.departure_time, "")).strip() == "now"
+        func.lower(func.trim(func.coalesce(RideRequest.departure_time, ""))) == "now"
     ).all()
 
     matches = []
@@ -461,7 +1141,13 @@ def match_passengers(trip_id: int, resort: str, db: Session = Depends(get_db)):
             passenger_lat, passenger_lng
         )
         if xtd < RIDE_NOW_ROUTE_KM:
-            matches.append(req)
+            # Additional check: passenger must be ahead of driver (not behind)
+            if is_ahead_on_route(
+                driver_lat, driver_lng,
+                resort_coords["lat"], resort_coords["lng"],
+                passenger_lat, passenger_lng
+            ):
+                matches.append(req)
     return matches
 
 
@@ -493,7 +1179,7 @@ def match_passengers_debug(trip_id: int, resort: str, db: Session = Depends(get_
     requests = db.query(RideRequest).filter(
         RideRequest.resort == resort,
         RideRequest.status == "pending",
-        func.lower(func.coalesce(RideRequest.departure_time, "")).strip() == "now",
+        func.lower(func.trim(func.coalesce(RideRequest.departure_time, ""))) == "now",
     ).all()
 
     passengers = []
@@ -503,15 +1189,31 @@ def match_passengers_debug(trip_id: int, resort: str, db: Session = Depends(get_
             resort_coords["lat"], resort_coords["lng"],
             req.pickup_lat, req.pickup_lng,
         )
-        would_match = xtd < RIDE_NOW_ROUTE_KM and trip.available_seats >= (req.seats_needed or 1)
+        ahead = is_ahead_on_route(
+            driver_lat, driver_lng,
+            resort_coords["lat"], resort_coords["lng"],
+            req.pickup_lat, req.pickup_lng
+        )
+        would_match = xtd < RIDE_NOW_ROUTE_KM and ahead and trip.available_seats >= (req.seats_needed or 1)
+        
+        skip_reason = None
+        if not would_match:
+            if xtd >= RIDE_NOW_ROUTE_KM:
+                skip_reason = f"xtd>={RIDE_NOW_ROUTE_KM}km"
+            elif not ahead:
+                skip_reason = "behind driver or past resort"
+            else:
+                skip_reason = "seats"
+        
         passengers.append({
             "id": req.id,
             "passenger_name": req.passenger_name,
             "pickup_lat": req.pickup_lat,
             "pickup_lng": req.pickup_lng,
             "xtd_km": round(xtd, 3),
+            "ahead_of_driver": ahead,
             "would_match": would_match,
-            "skip_reason": None if would_match else (f"xtd>={RIDE_NOW_ROUTE_KM}km" if xtd >= RIDE_NOW_ROUTE_KM else "seats"),
+            "skip_reason": skip_reason,
         })
 
     return {
@@ -579,17 +1281,23 @@ def match_drivers(request_id: int, resort: str, db: Session = Depends(get_db)):
             passenger_lat, passenger_lng
         )
         if xtd < RIDE_NOW_ROUTE_KM:
-            matches.append({
-                "id": trip.id,
-                "driver_name": trip.driver_name,
-                "current_lat": driver_lat,
-                "current_lng": driver_lng,
-                "start_lat": trip.start_lat,  # For fallback
-                "start_lng": trip.start_lng,  # For fallback
-                "available_seats": trip.available_seats,
-                "departure_time": trip.departure_time,
-                "resort": trip.resort
-            })
+            # Additional check: passenger must be ahead of driver (not behind)
+            if is_ahead_on_route(
+                driver_lat, driver_lng,
+                resort_coords["lat"], resort_coords["lng"],
+                passenger_lat, passenger_lng
+            ):
+                matches.append({
+                    "id": trip.id,
+                    "driver_name": trip.driver_name,
+                    "current_lat": driver_lat,
+                    "current_lng": driver_lng,
+                    "start_lat": trip.start_lat,  # For fallback
+                    "start_lng": trip.start_lng,  # For fallback
+                    "available_seats": trip.available_seats,
+                    "departure_time": trip.departure_time,
+                    "resort": trip.resort
+                })
     return matches
 
 @app.get("/trips/active")
@@ -623,7 +1331,7 @@ def get_active_requests(is_realtime: Optional[bool] = None, db: Session = Depend
     query = db.query(RideRequest).filter(RideRequest.status == "pending")
     
     if is_realtime is not None:
-        now_expr = func.lower(func.coalesce(RideRequest.departure_time, "")).strip() == "now"
+        now_expr = func.lower(func.trim(func.coalesce(RideRequest.departure_time, ""))) == "now"
         if is_realtime:
             query = query.filter(now_expr)
         else:
@@ -761,7 +1469,7 @@ def match_scheduled_rides(
         trips = [t for t in trips if _date_eq(t.trip_date, target_date_parsed)]
 
         # Get scheduled ride requests for the target date (exclude Ride Now)
-        now_expr = func.lower(func.coalesce(RideRequest.departure_time, "")).strip() == "now"
+        now_expr = func.lower(func.trim(func.coalesce(RideRequest.departure_time, ""))) == "now"
         requests = db.query(RideRequest).filter(
             RideRequest.resort == resort,
             RideRequest.status == "pending",
@@ -872,7 +1580,7 @@ def match_scheduled_debug(resort: str, target_date: Optional[str] = None, db: Se
     ).all()
     trips = [t for t in trips if _date_eq(t.trip_date, target_date_parsed)]
 
-    now_expr = func.lower(func.coalesce(RideRequest.departure_time, "")).strip() == "now"
+    now_expr = func.lower(func.trim(func.coalesce(RideRequest.departure_time, ""))) == "now"
     requests = db.query(RideRequest).filter(
         RideRequest.resort == resort,
         RideRequest.status == "pending",
@@ -928,14 +1636,87 @@ def match_scheduled_debug(resort: str, target_date: Optional[str] = None, db: Se
         "requests_sample": [_r(r) for r in requests[:5]],
     }
 
-@app.post("/match-scheduled/{match_id}/confirm")
-def confirm_scheduled_match(match_id: int, db: Session = Depends(get_db)):
-    """Confirm a scheduled match and link the trip and request"""
-    pass
+@app.post("/match-scheduled/confirm")
+def confirm_scheduled_match(
+    trip_id: int = Query(...),
+    request_id: int = Query(...),
+    hub_id: str = Query(...),
+    db: Session = Depends(get_db)
+):
+    """Confirm a scheduled match and link the trip and request with selected hub.
+    
+    Args:
+        trip_id: The driver's trip ID
+        request_id: The passenger's ride request ID
+        hub_id: The selected hub ID (or "driver_start")
+    """
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found")
+    
+    request = db.query(RideRequest).filter(RideRequest.id == request_id).first()
+    if not request:
+        raise HTTPException(status_code=404, detail="Ride request not found")
+    
+    # Validate hub exists (or is driver_start)
+    if hub_id != "driver_start" and hub_id not in HUBS:
+        raise HTTPException(status_code=400, detail="Invalid hub ID")
+    
+    # Check if trip has available seats
+    seats_needed = request.seats_needed if hasattr(request, 'seats_needed') and request.seats_needed else 1
+    if trip.available_seats < seats_needed:
+        raise HTTPException(status_code=400, detail="Not enough available seats")
+    
+    # Check if request is already matched
+    if request.matched_trip_id:
+        raise HTTPException(status_code=400, detail="Ride request is already matched")
+    
+    # Create the match
+    request.matched_trip_id = trip_id
+    request.suggested_hub_id = hub_id
+    request.status = "matched"
+    trip.available_seats -= seats_needed
+    trip.status = "matched"
+    
+    db.commit()
+    db.refresh(trip)
+    db.refresh(request)
+    
+    # Get hub details for response
+    if hub_id == "driver_start" and trip.start_lat and trip.start_lng:
+        hub = {
+            "id": "driver_start",
+            "name": "Meet at driver's start",
+            "lat": trip.start_lat,
+            "lng": trip.start_lng,
+            "address": trip.start_location_text or "Driver's starting location"
+        }
+    else:
+        hub_data = HUBS.get(hub_id)
+        hub = {
+            "id": hub_id,
+            "name": hub_data["name"],
+            "lat": hub_data["lat"],
+            "lng": hub_data["lng"],
+            "address": hub_data.get("address", "")
+        }
+    
+    return {
+        "message": "Scheduled match confirmed",
+        "trip_id": trip_id,
+        "request_id": request_id,
+        "hub": hub,
+        "remaining_seats": trip.available_seats,
+        "driver_name": trip.driver_name,
+        "passenger_name": request.passenger_name,
+        "resort": trip.resort
+    }
 
 # --- RIDE REQUESTS (PASSENGER) ---
 @app.post("/ride-requests/", response_model=schemas.RideRequest)
 def create_ride_request(req: schemas.RideRequestCreate, db: Session = Depends(get_db)):
+    t0 = time.perf_counter()
+    logger.info(f"📥 POST /ride-requests/ received (passenger={getattr(req, 'passenger_name', '?')}, resort={getattr(req, 'resort', '?')}, has_lat_lng={req.lat is not None and req.lng is not None})")
     lat, lng = req.lat, req.lng
     is_scheduled = not _is_departure_now(req.departure_time)
 
@@ -990,7 +1771,17 @@ def create_ride_request(req: schemas.RideRequestCreate, db: Session = Depends(ge
     db.add(new_req)
     db.commit()
     db.refresh(new_req)
+    elapsed = time.perf_counter() - t0
+    logger.info(f"✅ POST /ride-requests/ completed in {elapsed:.2f}s (request_id={new_req.id})")
     return new_req
+
+@app.get("/ride-requests/{request_id}", response_model=schemas.RideRequest)
+def get_ride_request(request_id: int, db: Session = Depends(get_db)):
+    """Get a ride request by ID"""
+    request = db.query(RideRequest).filter(RideRequest.id == request_id).first()
+    if not request:
+        raise HTTPException(status_code=404, detail="Ride request not found")
+    return request
 
 @app.put("/ride-requests/{request_id}/location", response_model=schemas.RideRequest)
 def update_ride_request_location(request_id: int, location: schemas.LocationUpdate, db: Session = Depends(get_db)):

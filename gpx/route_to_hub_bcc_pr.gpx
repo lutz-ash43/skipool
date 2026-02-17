@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="SkiPool Test Routes" xmlns="http://www.topografix.com/GPX/1/1">
+  <metadata>
+    <name>Route to Big Cottonwood Canyon Park and Ride Hub</name>
+  </metadata>
+  <trk>
+    <name>Midvale to BCC P&R Hub</name>
+    <trkseg>
+      <trkpt lat="40.6211" lon="-111.8989">
+        <time>2026-02-15T07:00:00Z</time>
+        <name>Start: Midvale</name>
+      </trkpt>
+      <trkpt lat="40.6210" lon="-111.8850">
+        <time>2026-02-15T07:02:00Z</time>
+        <name>Fort Union Blvd East</name>
+      </trkpt>
+      <trkpt lat="40.6205" lon="-111.8650">
+        <time>2026-02-15T07:04:00Z</time>
+        <name>1300 East</name>
+      </trkpt>
+      <trkpt lat="40.6200" lon="-111.8400">
+        <time>2026-02-15T07:06:00Z</time>
+        <name>Highland Dr</name>
+      </trkpt>
+      <trkpt lat="40.6198" lon="-111.8100">
+        <time>2026-02-15T07:08:00Z</time>
+        <name>Wasatch Blvd South</name>
+      </trkpt>
+      <trkpt lat="40.6194" lon="-111.7870">
+        <time>2026-02-15T07:10:00Z</time>
+        <name>Arrive: Big Cottonwood Canyon Park and Ride Hub</name>
+      </trkpt>
+    </trkseg>
+  </trk>
+</gpx>
